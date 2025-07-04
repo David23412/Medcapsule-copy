@@ -94,6 +94,11 @@ class MistakeController extends Controller
         // If the answer is incorrect, store the mistake
         DB::beginTransaction();
         try {
+            // Validate that the question exists before proceeding
+            if (!Question::find($questionId)) {
+                throw new \InvalidArgumentException("Question with ID {$questionId} not found");
+            }
+
             $mistake = Mistake::where('user_id', $userId)
                   ->where('question_id', $questionId)
                   ->first();
@@ -102,7 +107,10 @@ class MistakeController extends Controller
                 // Update existing mistake
                 $mistake->submitted_answer = $submittedAnswer;
                 $mistake->last_attempt_date = now();
-                $mistake->save();
+                if (!$mistake->save()) {
+                    throw new \RuntimeException('Failed to update existing mistake');
+                }
+                Log::info('✅ Mistake updated', ['question_id' => $questionId, 'user_id' => $userId]);
             } else {
                 // Create a new mistake entry
                 $mistake = Mistake::create([
@@ -112,19 +120,62 @@ class MistakeController extends Controller
                     'last_attempt_date' => now(),
                 ]);
 
+                if (!$mistake) {
+                    throw new \RuntimeException('Failed to create new mistake record');
+                }
+
                 // Initialize Anki parameters for new mistake
-                $mistake->initializeAnki();
-                $mistake->save();
+                try {
+                    $mistake->initializeAnki();
+                    if (!$mistake->save()) {
+                        throw new \RuntimeException('Failed to save Anki initialization');
+                    }
+                } catch (\Exception $ankiError) {
+                    Log::warning('Failed to initialize Anki parameters', [
+                        'error' => $ankiError->getMessage(),
+                        'mistake_id' => $mistake->id
+                    ]);
+                    // Continue without Anki - not critical for core functionality
+                }
+                
+                Log::info('✅ New mistake created', ['question_id' => $questionId, 'user_id' => $userId]);
             }
 
+            // Commit transaction only if everything succeeded
             DB::commit();
-            Log::info('✅ Mistake recorded', ['question_id' => $questionId]);
-
-            return response()->json(['message' => 'Mistake recorded.']);
+            
+            return response()->json([
+                'message' => 'Mistake recorded.',
+                'mistake_id' => $mistake->id
+            ]);
+            
+        } catch (\InvalidArgumentException $e) {
+            DB::rollBack();
+            Log::error('❌ Invalid data for mistake storage', [
+                'error' => $e->getMessage(),
+                'question_id' => $questionId,
+                'user_id' => $userId
+            ]);
+            return response()->json(['error' => 'Invalid question or user data.'], 400);
+            
+        } catch (\RuntimeException $e) {
+            DB::rollBack();
+            Log::error('❌ Runtime error storing mistake', [
+                'error' => $e->getMessage(),
+                'question_id' => $questionId,
+                'user_id' => $userId
+            ]);
+            return response()->json(['error' => 'Database operation failed.'], 500);
+            
         } catch (\Exception $e) {
             DB::rollBack();
-            Log::error('❌ Error storing mistake', ['error' => $e->getMessage()]);
-            return response()->json(['error' => 'Failed to record mistake.'], 500);
+            Log::error('❌ Unexpected error storing mistake', [
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString(),
+                'question_id' => $questionId,
+                'user_id' => $userId
+            ]);
+            return response()->json(['error' => 'An unexpected error occurred.'], 500);
         }
     }
 
