@@ -16,14 +16,22 @@ class Payment extends Model
         'reference_number',
         'amount',
         'payment_method',
+        'transaction_id',
+        'receipt_path',
         'status',
         'payment_data',
         'paid_at',
+        'verified_by',
+        'verified_at',
+        'rejection_reason',
+        'admin_notes',
     ];
 
     protected $casts = [
         'payment_data' => 'json',
         'paid_at' => 'datetime',
+        'verified_at' => 'datetime',
+        'amount' => 'decimal:2',
     ];
 
     /**
@@ -40,6 +48,14 @@ class Payment extends Model
     public function course(): BelongsTo
     {
         return $this->belongsTo(Course::class);
+    }
+
+    /**
+     * Get the admin who verified this payment
+     */
+    public function verifiedBy(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'verified_by');
     }
 
     /**

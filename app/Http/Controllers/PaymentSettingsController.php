@@ -27,18 +27,20 @@ class PaymentSettingsController extends Controller
      */
     public function showPaymentSettingsForm()
     {
-        // Get current settings from config
+        // Get current settings from cache with config fallbacks
+        $cachedSettings = $this->getCachedSettings();
+        
         $settings = [
             'ocr' => [
-                'enabled' => config('payment.ocr.enabled', true),
-                'approval_threshold' => config('payment.ocr.approval_threshold', 7),
-                'admin_review_threshold' => config('payment.ocr.admin_review_threshold', 4),
+                'enabled' => $cachedSettings['ocr_enabled'] ?? config('payment.ocr.enabled', true),
+                'approval_threshold' => $cachedSettings['ocr_approval_threshold'] ?? config('payment.ocr.approval_threshold', 7),
+                'admin_review_threshold' => $cachedSettings['ocr_admin_review_threshold'] ?? config('payment.ocr.admin_review_threshold', 4),
                 'save_processed_images' => config('payment.ocr.save_processed_images', true),
                 'enhance_image' => config('payment.ocr.enhance_image', true),
             ],
             'verification' => [
-                'auto_approval_threshold' => config('payment.verification.auto_approval_threshold', 70),
-                'expedited_review_threshold' => config('payment.verification.expedited_review_threshold', 40),
+                'auto_approval_threshold' => $cachedSettings['auto_approval_threshold'] ?? config('payment.verification.auto_approval_threshold', 70),
+                'expedited_review_threshold' => $cachedSettings['expedited_review_threshold'] ?? config('payment.verification.expedited_review_threshold', 40),
                 'method_weights' => config('payment.verification.method_weights', [
                     'transaction_pattern' => 5,
                     'ocr' => 3,
@@ -52,7 +54,7 @@ class PaymentSettingsController extends Controller
             ],
             'general' => [
                 'reference_expiry_hours' => config('payment.reference_expiry_hours', 24),
-                'enable_auto_verification' => config('payment.enable_auto_verification', true),
+                'enable_auto_verification' => $cachedSettings['auto_verification_enabled'] ?? config('payment.enable_auto_verification', true),
             ]
         ];
 
@@ -81,28 +83,33 @@ class PaymentSettingsController extends Controller
         ]);
 
         try {
-            // Update environment variables for dynamic settings
-            $this->updateEnvironmentFile([
-                'PAYMENT_OCR_ENABLED' => $request->ocr_enabled ? 'true' : 'false',
-                'ENABLE_PAYMENT_AUTO_VERIFICATION' => $request->auto_verification_enabled ? 'true' : 'false',
-                'PAYMENT_OCR_APPROVAL_THRESHOLD' => $request->ocr_approval_threshold,
-                'PAYMENT_OCR_ADMIN_REVIEW_THRESHOLD' => $request->ocr_admin_review_threshold,
-                'PAYMENT_VERIFICATION_THRESHOLD' => $request->auto_approval_threshold,
-                'PAYMENT_EXPEDITED_REVIEW_THRESHOLD' => $request->expedited_review_threshold,
-            ]);
+            // Store settings in cache instead of modifying .env file
+            $settingsData = [
+                'ocr_enabled' => $request->ocr_enabled ?? false,
+                'auto_verification_enabled' => $request->auto_verification_enabled ?? false,
+                'ocr_approval_threshold' => $request->ocr_approval_threshold ?? 7,
+                'ocr_admin_review_threshold' => $request->ocr_admin_review_threshold ?? 4,
+                'auto_approval_threshold' => $request->auto_approval_threshold ?? 70,
+                'expedited_review_threshold' => $request->expedited_review_threshold ?? 40,
+                'updated_by' => auth()->id(),
+                'updated_at' => now()->toIso8601String()
+            ];
 
-            // Clear config cache to apply changes
-            Artisan::call('config:clear');
+            // Store in cache with long expiration (24 hours)
+            Cache::put('payment_system_settings', $settingsData, 86400);
+            
+            // Clear related caches
             Cache::forget('payment_system_status');
 
             // Log the changes
             Log::info('Payment settings updated by admin', [
                 'admin_id' => auth()->id(),
-                'changes' => $validated
+                'changes' => $validated,
+                'storage_method' => 'cache'
             ]);
 
             return redirect()->route('payment-settings.form')
-                ->with('success', 'Payment settings updated successfully');
+                ->with('success', 'Payment settings updated successfully. Changes are stored securely in cache.');
         } catch (\Exception $e) {
             Log::error('Error updating payment settings', [
                 'error' => $e->getMessage(),
@@ -122,42 +129,42 @@ class PaymentSettingsController extends Controller
     private function checkOcrAvailability()
     {
         try {
-            $output = null;
-            $returnVar = null;
-            exec('which tesseract 2>/dev/null', $output, $returnVar);
+            // Safer alternative to exec() - check if tesseract binary exists
+            $possiblePaths = [
+                '/usr/bin/tesseract',
+                '/usr/local/bin/tesseract',
+                '/opt/homebrew/bin/tesseract'
+            ];
             
-            return $returnVar === 0;
+            foreach ($possiblePaths as $path) {
+                if (file_exists($path) && is_executable($path)) {
+                    return true;
+                }
+            }
+            
+            // Alternative: check if tesseract command exists using which command safely
+            $whichResult = shell_exec('command -v tesseract 2>/dev/null');
+            return !empty($whichResult);
         } catch (\Exception $e) {
+            \Log::warning('Error checking OCR availability', ['error' => $e->getMessage()]);
             return false;
         }
     }
 
     /**
-     * Update the environment file with new values.
+     * Get cached payment settings with fallback to config defaults
      *
-     * @param array $values
-     * @return void
+     * @return array
      */
-    private function updateEnvironmentFile(array $values)
+    private function getCachedSettings(): array
     {
-        $envFile = app()->environmentFilePath();
-        $envContents = file_get_contents($envFile);
-
-        foreach ($values as $key => $value) {
-            // First check if the key exists
-            if (strpos($envContents, "{$key}=") !== false) {
-                // Replace existing value
-                $envContents = preg_replace(
-                    "/^{$key}=.*/m",
-                    "{$key}={$value}",
-                    $envContents
-                );
-            } else {
-                // Add new value
-                $envContents .= PHP_EOL . "{$key}={$value}";
-            }
-        }
-
-        file_put_contents($envFile, $envContents);
+        return Cache::get('payment_system_settings', [
+            'ocr_enabled' => config('payment.ocr.enabled', true),
+            'auto_verification_enabled' => config('payment.enable_auto_verification', true),
+            'ocr_approval_threshold' => config('payment.ocr.approval_threshold', 7),
+            'ocr_admin_review_threshold' => config('payment.ocr.admin_review_threshold', 4),
+            'auto_approval_threshold' => config('payment.verification.auto_approval_threshold', 70),
+            'expedited_review_threshold' => config('payment.verification.expedited_review_threshold', 40),
+        ]);
     }
 } 
