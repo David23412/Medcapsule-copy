@@ -107,7 +107,7 @@ class MistakeController extends Controller
                 // Create a new mistake entry
                 $mistake = Mistake::create([
                     'user_id' => $userId,
-                    'question_id', $questionId,
+                    'question_id' => $questionId,
                     'submitted_answer' => $submittedAnswer,
                     'last_attempt_date' => now(),
                 ]);
